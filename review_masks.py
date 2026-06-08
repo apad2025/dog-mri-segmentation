@@ -75,7 +75,7 @@ from biceps_pipeline import load_dicom_images
 
 PROJECT_ROOT = Path(__file__).parent
 DICOM_ROOT   = PROJECT_ROOT / "DICOM_Files"
-MASK_DIR     = PROJECT_ROOT / "masks_out_sam2"
+MASK_DIR     = PROJECT_ROOT / "masks_out"
 
 # ── Echo-format settings (only used when MASK_DIR contains bf_masks_echo*.npy) ─
 # Set DICOM_SERIES to the relative path under DICOM_ROOT, e.g.:
