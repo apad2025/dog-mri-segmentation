@@ -1,0 +1,22 @@
+# Model checkpoints
+*.pth
+*.pt
+
+# MRI data and outputs
+DICOM_Files/
+masks_out*/
+*.nrrd
+
+# Generated QC images
+*.png
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+
+# DB
+ctkDICOM-Database/
