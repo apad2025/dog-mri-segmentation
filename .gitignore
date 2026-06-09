@@ -5,6 +5,8 @@
 # MRI data and outputs
 DICOM_Files/
 masks_out*/
+edited_masks/
+mat_out/
 *.nrrd
 
 # Generated QC images

@@ -16,7 +16,7 @@ Controls:
   Scroll wheel    – zoom all three panels simultaneously
   R               – reset zoom
   Ctrl+Z          – undo last stroke on the current slice
-  Ctrl+S          – save mask (overwrites the .npy in masks_out)
+  Ctrl+S          – save mask (writes to edited_masks/, leaving masks_out/ untouched)
   Q               – quit (prompts if there are unsaved changes)
 
 Usage:
@@ -24,6 +24,7 @@ Usage:
 """
 
 from pathlib import Path
+import shutil
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
@@ -33,9 +34,25 @@ from matplotlib.patches import Circle
 from biceps_pipeline import load_dicom_images
 
 
-PROJECT_ROOT = Path(__file__).parent
-DICOM_ROOT   = PROJECT_ROOT / "DICOM_Files"
-MASK_DIR     = PROJECT_ROOT / "masks_out"
+PROJECT_ROOT    = Path(__file__).parent
+DICOM_ROOT      = PROJECT_ROOT / "DICOM_Files"
+MASK_DIR        = PROJECT_ROOT / "masks_out"
+EDITED_MASK_DIR = PROJECT_ROOT / "edited_masks"
+
+
+# ── Backup prompt ─────────────────────────────────────────────────────────────
+EDITED_MASK_DIR.mkdir(exist_ok=True)
+source_masks = sorted(MASK_DIR.glob("*_mask.npy"))
+uncopied = [f for f in source_masks if not (EDITED_MASK_DIR / f.name).exists()]
+if uncopied:
+    resp = input(
+        f"Copy {len(uncopied)} mask(s) from masks_out/ to edited_masks/ "
+        f"to keep the originals as a backup? [Y/n]: "
+    ).strip().lower()
+    if resp in ("", "y"):
+        for f in uncopied:
+            shutil.copy2(f, EDITED_MASK_DIR / f.name)
+        print(f"Copied {len(uncopied)} mask(s) to {EDITED_MASK_DIR}")
 
 
 # ── Series selection ──────────────────────────────────────────────────────────
@@ -60,7 +77,9 @@ elif choice in available:
 else:
     print("Not found."); sys.exit(1)
 
-mask_path  = MASK_DIR / f"{name}_mask.npy"
+edited_path = EDITED_MASK_DIR / f"{name}_mask.npy"
+mask_path   = edited_path if edited_path.exists() else MASK_DIR / f"{name}_mask.npy"
+save_path   = edited_path  # always write to edited_masks/
 date, subseries = name.split("_", 1)
 dicom_path = DICOM_ROOT / date / subseries
 
@@ -171,9 +190,9 @@ def _paint(x, y):
 
 def _save():
     global dirty
-    np.save(mask_path, masks)
+    np.save(save_path, masks)
     dirty = False
-    print(f"Saved -> {mask_path}")
+    print(f"Saved -> {save_path}")
     _status()
     fig.canvas.draw_idle()
 

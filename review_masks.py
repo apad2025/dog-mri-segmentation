@@ -72,10 +72,24 @@ from matplotlib.widgets import Slider
 
 from biceps_pipeline import load_dicom_images
 
-
 PROJECT_ROOT = Path(__file__).parent
-DICOM_ROOT   = PROJECT_ROOT / "DICOM_Files"
-MASK_DIR     = PROJECT_ROOT / "masks_out"
+DICOM_ROOT = PROJECT_ROOT / "DICOM_Files"
+
+# ── Mask source prompt ────────────────────────────────────────────────────────
+print("Which masks would you like to review?")
+print("  [1] SAM masks in masks_out/")
+print("  [2] Edited masks in edited_masks/")
+_src = input("Choice [1/2]: ").strip()
+if _src == "2":
+    MASK_DIR = PROJECT_ROOT / "edited_masks"
+    _src_label = "edited"
+else:
+    MASK_DIR = PROJECT_ROOT / "masks_out"
+    _src_label = "SAM"
+
+if not MASK_DIR.exists():
+    print(f"Folder not found: {MASK_DIR}")
+    sys.exit(1)
 
 # ── Echo-format settings (only used when MASK_DIR contains bf_masks_echo*.npy) ─
 # Set DICOM_SERIES to the relative path under DICOM_ROOT, e.g.:
@@ -84,10 +98,9 @@ MASK_DIR     = PROJECT_ROOT / "masks_out"
 DICOM_SERIES = "20240709/GRE2D_FATWATER_WAYLON_0012"
 SLICE_OFFSET = 0
 
-
 # ── Detect format and load masks ───────────────────────────────────────────────
 classic_files = sorted(MASK_DIR.glob("*_mask.npy"))
-echo_files    = sorted(MASK_DIR.glob("bf_masks_echo*.npy"))
+echo_files = sorted(MASK_DIR.glob("bf_masks_echo*.npy"))
 
 if classic_files:
     # ── Classic format: one file per series ──────────────────────────────────
@@ -114,16 +127,16 @@ if classic_files:
         sys.exit(1)
 
     print(f"\nLoading {name} ...")
-    masks = np.load(mask_path)                      # (7, 50, H, W)
-    imgs  = load_dicom_images(str(dicom_path))      # (7, 50, H, W)
-    echo  = 0
+    masks = np.load(mask_path)  # (7, 50, H, W)
+    imgs = load_dicom_images(str(dicom_path))  # (7, 50, H, W)
+    echo = 0
 
 elif echo_files:
     # ── Echo format: one file per echo, stack into (n_echoes, n_slices, H, W) ─
     echo_arrays = [np.load(p) for p in echo_files]  # each (n_slices, H, W)
-    masks = np.stack(echo_arrays, axis=0)            # (n_echoes, n_slices, H, W)
-    name  = MASK_DIR.name
-    echo  = 0
+    masks = np.stack(echo_arrays, axis=0)  # (n_echoes, n_slices, H, W)
+    name = MASK_DIR.name
+    echo = 0
     n_slices = masks.shape[1]
 
     if DICOM_SERIES:
@@ -132,22 +145,21 @@ elif echo_files:
             print(f"DICOM folder not found: {dicom_path}")
             sys.exit(1)
         print(f"\nLoading {name} ...")
-        all_imgs = load_dicom_images(str(dicom_path))   # (7, 50, H, W)
+        all_imgs = load_dicom_images(str(dicom_path))  # (7, 50, H, W)
         end = SLICE_OFFSET + n_slices
-        imgs = all_imgs[:, SLICE_OFFSET:end, :, :]      # (7, n_slices, H, W)
+        imgs = all_imgs[:, SLICE_OFFSET:end, :, :]  # (7, n_slices, H, W)
         if imgs.shape[1] < n_slices:
             print(f"Warning: DICOM only has {all_imgs.shape[1]} slices; "
                   f"SLICE_OFFSET={SLICE_OFFSET} leaves only {imgs.shape[1]} slices.")
     else:
         print(f"\nLoading {name} (no DICOM — set DICOM_SERIES to show originals) ...")
         H, W = masks.shape[2], masks.shape[3]
-        imgs  = np.zeros((masks.shape[0], n_slices, H, W), dtype=np.float32)
+        imgs = np.zeros((masks.shape[0], n_slices, H, W), dtype=np.float32)
 
 else:
     print(f"No masks found in {MASK_DIR}\n"
           f"  Expected '*_mask.npy' (classic) or 'bf_masks_echo*.npy' (echo format).")
     sys.exit(1)
-
 
 # ── Build figure ───────────────────────────────────────────────────────────────
 n_slices = masks.shape[1]
@@ -156,9 +168,9 @@ IMG_H, IMG_W = imgs.shape[2], imgs.shape[3]
 fig, axes = plt.subplots(1, 3, figsize=(13, 5))
 plt.subplots_adjust(bottom=0.12, top=0.88)
 
-im_orig    = axes[0].imshow(imgs[echo, 0],  cmap="gray", vmin=0, vmax=1)
-im_mask    = axes[1].imshow(masks[echo, 0], cmap="gray", vmin=0, vmax=1)
-im_base    = axes[2].imshow(imgs[echo, 0],  cmap="gray", vmin=0, vmax=1)
+im_orig = axes[0].imshow(imgs[echo, 0], cmap="gray", vmin=0, vmax=1)
+im_mask = axes[1].imshow(masks[echo, 0], cmap="gray", vmin=0, vmax=1)
+im_base = axes[2].imshow(imgs[echo, 0], cmap="gray", vmin=0, vmax=1)
 im_overlay = axes[2].imshow(masks[echo, 0], cmap="Reds", alpha=0.45, vmin=0, vmax=1)
 
 axes[0].set_title("Original")
@@ -167,18 +179,18 @@ axes[2].set_title("Overlay")
 for ax in axes:
     ax.axis("off")
 
-title = fig.suptitle(f"{name}  —  slice 0 / {n_slices - 1}", fontsize=11)
+title = fig.suptitle(f"{name}  [{_src_label}]  —  slice 0 / {n_slices - 1}", fontsize=11)
 fig.text(0.5, 0.97, "Scroll to zoom  ·  R to reset", ha="center", va="top",
          fontsize=8, color="gray")
 
 # ── Slider ─────────────────────────────────────────────────────────────────────
 ax_slider = plt.axes([0.15, 0.03, 0.7, 0.03])
-slider    = Slider(ax_slider, "Slice", 0, n_slices - 1, valinit=0, valstep=1)
+slider = Slider(ax_slider, "Slice", 0, n_slices - 1, valinit=0, valstep=1)
 
 
 def update(val):
-    s    = int(slider.val)
-    img  = imgs[echo, s]
+    s = int(slider.val)
+    img = imgs[echo, s]
     mask = masks[echo, s]
 
     im_orig.set_data(img)
@@ -186,7 +198,7 @@ def update(val):
     im_base.set_data(img)
     im_overlay.set_data(mask)
 
-    title.set_text(f"{name}  —  slice {s} / {n_slices - 1}")
+    title.set_text(f"{name}  [{_src_label}]  —  slice {s} / {n_slices - 1}")
     fig.canvas.draw_idle()
 
 
