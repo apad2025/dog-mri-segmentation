@@ -171,7 +171,7 @@ plt.subplots_adjust(bottom=0.12, top=0.88)
 im_orig = axes[0].imshow(imgs[echo, 0], cmap="gray", vmin=0, vmax=1)
 im_mask = axes[1].imshow(masks[echo, 0], cmap="gray", vmin=0, vmax=1)
 im_base = axes[2].imshow(imgs[echo, 0], cmap="gray", vmin=0, vmax=1)
-im_overlay = axes[2].imshow(masks[echo, 0], cmap="Reds", alpha=0.45, vmin=0, vmax=1)
+im_overlay = axes[2].imshow(np.ma.masked_where(masks[echo, 0] == 0, masks[echo, 0]), cmap="Reds", alpha=0.45, vmin=0, vmax=1)
 
 axes[0].set_title("Original")
 axes[1].set_title("Mask")
@@ -196,7 +196,7 @@ def update(val):
     im_orig.set_data(img)
     im_mask.set_data(mask)
     im_base.set_data(img)
-    im_overlay.set_data(mask)
+    im_overlay.set_data(np.ma.masked_where(mask == 0, mask))
 
     title.set_text(f"{name}  [{_src_label}]  —  slice {s} / {n_slices - 1}")
     fig.canvas.draw_idle()

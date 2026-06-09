@@ -137,7 +137,7 @@ im_orig = ax_orig.imshow(imgs[echo, 0], cmap="gray", vmin=0, vmax=1)
 im_mask = ax_mask.imshow(masks[echo, 0].astype("float32"), cmap="gray", vmin=0, vmax=1)
 im_base = ax_over.imshow(imgs[echo, 0], cmap="gray", vmin=0, vmax=1)
 im_overlay = ax_over.imshow(
-    masks[echo, 0].astype("float32"), cmap="Reds", alpha=0.5, vmin=0, vmax=1
+    np.ma.masked_where(masks[echo, 0] == 0, masks[echo, 0]), cmap="Reds", alpha=0.5, vmin=0, vmax=1
 )
 
 ax_orig.set_title("Original", fontsize=10, pad=4)
@@ -155,6 +155,16 @@ brush_circle = Circle(
 )
 ax_mask.add_patch(brush_circle)
 
+brush_circle_over = Circle(
+    (0, 0),
+    radius=state["brush_r"],
+    fill=False,
+    color="cyan",
+    linewidth=1.2,
+    visible=False,
+)
+ax_over.add_patch(brush_circle_over)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _status():
@@ -168,6 +178,7 @@ def _status():
     )
     status_txt.set_color(color if dirty else "black")
     brush_circle.set_color(color)
+    brush_circle_over.set_color(color)
 
 
 def _redraw(s=None):
@@ -177,7 +188,7 @@ def _redraw(s=None):
     im_orig.set_data(imgs[echo, s])
     im_mask.set_data(m)
     im_base.set_data(imgs[echo, s])
-    im_overlay.set_data(m)
+    im_overlay.set_data(np.ma.masked_where(m == 0, m))
     title.set_text(f"{name}  —  slice {s} / {n_slices - 1}")
     _status()
     fig.canvas.draw_idle()
@@ -220,7 +231,7 @@ def on_slider(val):
 
 
 def on_press(event):
-    if event.inaxes != ax_mask or event.button != 1:
+    if event.inaxes not in (ax_mask, ax_over) or event.button != 1:
         return
     if event.xdata is None or event.ydata is None:
         return
@@ -238,16 +249,24 @@ def on_release(event):
 
 
 def on_motion(event):
-    if event.inaxes == ax_mask and event.xdata is not None:
-        brush_circle.set_center((event.xdata, event.ydata))
-        brush_circle.set_visible(True)
+    on_mask = event.inaxes == ax_mask and event.xdata is not None
+    on_over = event.inaxes == ax_over and event.xdata is not None
+
+    if on_mask or on_over:
+        circle = brush_circle if on_mask else brush_circle_over
+        other  = brush_circle_over if on_mask else brush_circle
+        circle.set_center((event.xdata, event.ydata))
+        circle.set_visible(True)
+        other.set_visible(False)
         if state["painting"]:
             _paint(event.xdata, event.ydata)
         else:
             fig.canvas.draw_idle()
     else:
-        if brush_circle.get_visible():
-            brush_circle.set_visible(False)
+        changed = brush_circle.get_visible() or brush_circle_over.get_visible()
+        brush_circle.set_visible(False)
+        brush_circle_over.set_visible(False)
+        if changed:
             fig.canvas.draw_idle()
 
 
@@ -268,12 +287,14 @@ def on_key(event):
     elif event.key in ("[", "bracketleft"):
         state["brush_r"] = max(1, state["brush_r"] - 1)
         brush_circle.set_radius(state["brush_r"])
+        brush_circle_over.set_radius(state["brush_r"])
         _status()
         fig.canvas.draw_idle()
 
     elif event.key in ("]", "bracketright"):
         state["brush_r"] = min(60, state["brush_r"] + 1)
         brush_circle.set_radius(state["brush_r"])
+        brush_circle_over.set_radius(state["brush_r"])
         _status()
         fig.canvas.draw_idle()
 
