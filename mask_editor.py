@@ -34,9 +34,9 @@ from matplotlib.patches import Circle
 from biceps_pipeline import load_dicom_images
 
 
-PROJECT_ROOT    = Path(__file__).parent
-DICOM_ROOT      = PROJECT_ROOT / "DICOM_Files"
-MASK_DIR        = PROJECT_ROOT / "masks_out"
+PROJECT_ROOT = Path(__file__).parent
+DICOM_ROOT = PROJECT_ROOT / "DICOM_Files"
+MASK_DIR = PROJECT_ROOT / "masks_out"
 EDITED_MASK_DIR = PROJECT_ROOT / "edited_masks"
 
 
@@ -45,10 +45,14 @@ EDITED_MASK_DIR.mkdir(exist_ok=True)
 source_masks = sorted(MASK_DIR.glob("*_mask.npy"))
 uncopied = [f for f in source_masks if not (EDITED_MASK_DIR / f.name).exists()]
 if uncopied:
-    resp = input(
-        f"Copy {len(uncopied)} mask(s) from masks_out/ to edited_masks/ "
-        f"to keep the originals as a backup? [Y/n]: "
-    ).strip().lower()
+    resp = (
+        input(
+            f"Copy {len(uncopied)} mask(s) from masks_out/ to edited_masks/ "
+            f"to keep the originals as a backup? [Y/n]: "
+        )
+        .strip()
+        .lower()
+    )
     if resp in ("", "y"):
         for f in uncopied:
             shutil.copy2(f, EDITED_MASK_DIR / f.name)
@@ -70,28 +74,31 @@ choice = input("\nEnter folder name or index: ").strip()
 if choice.isdigit():
     idx = int(choice)
     if not (0 <= idx < len(available)):
-        print("Index out of range."); sys.exit(1)
+        print("Index out of range.")
+        sys.exit(1)
     name = available[idx]
 elif choice in available:
     name = choice
 else:
-    print("Not found."); sys.exit(1)
+    print("Not found.")
+    sys.exit(1)
 
 edited_path = EDITED_MASK_DIR / f"{name}_mask.npy"
-mask_path   = edited_path if edited_path.exists() else MASK_DIR / f"{name}_mask.npy"
-save_path   = edited_path  # always write to edited_masks/
+mask_path = edited_path if edited_path.exists() else MASK_DIR / f"{name}_mask.npy"
+save_path = edited_path  # always write to edited_masks/
 date, subseries = name.split("_", 1)
 dicom_path = DICOM_ROOT / date / subseries
 
 if not dicom_path.exists():
-    print(f"DICOM folder not found: {dicom_path}"); sys.exit(1)
+    print(f"DICOM folder not found: {dicom_path}")
+    sys.exit(1)
 
 print(f"Loading {name} ...")
-masks_orig = np.load(mask_path)                  # (7, 50, H, W)  bool
-imgs       = load_dicom_images(str(dicom_path))  # (7, 50, H, W)  float32
+masks_orig = np.load(mask_path)  # (7, 50, H, W)  bool
+imgs = load_dicom_images(str(dicom_path))  # (7, 50, H, W)  float32
 
-masks    = masks_orig.copy()
-echo     = 0
+masks = masks_orig.copy()
+echo = 0
 n_echoes = masks.shape[0]
 n_slices = masks.shape[1]
 IMG_H, IMG_W = imgs.shape[2], imgs.shape[3]
@@ -106,8 +113,8 @@ dirty = False  # unsaved changes flag
 
 # ── Figure ────────────────────────────────────────────────────────────────────
 # Prevent matplotlib built-ins from shadowing our keys.
-plt.rcParams["keymap.save"] = []   # was 's' / 'ctrl+s'
-plt.rcParams["keymap.quit"] = []   # was 'q' / 'ctrl+w'
+plt.rcParams["keymap.save"] = []  # was 's' / 'ctrl+s'
+plt.rcParams["keymap.quit"] = []  # was 'q' / 'ctrl+w'
 
 fig = plt.figure(figsize=(15, 6))
 
@@ -119,33 +126,42 @@ for ax in (ax_orig, ax_mask, ax_over):
     ax.axis("off")
 
 ax_slider = fig.add_axes([0.15, 0.05, 0.70, 0.03])
-slider    = Slider(ax_slider, "Slice", 0, n_slices - 1, valinit=0, valstep=1)
+slider = Slider(ax_slider, "Slice", 0, n_slices - 1, valinit=0, valstep=1)
 
-title      = fig.suptitle("", fontsize=11, y=0.97)
-status_txt = fig.text(0.5, 0.01, "", ha="center", va="bottom",
-                      fontsize=8, fontfamily="monospace")
+title = fig.suptitle("", fontsize=11, y=0.97)
+status_txt = fig.text(
+    0.5, 0.01, "", ha="center", va="bottom", fontsize=8, fontfamily="monospace"
+)
 
-im_orig    = ax_orig.imshow(imgs[echo, 0],                    cmap="gray", vmin=0, vmax=1)
-im_mask    = ax_mask.imshow(masks[echo, 0].astype("float32"), cmap="gray", vmin=0, vmax=1)
-im_base    = ax_over.imshow(imgs[echo, 0],                    cmap="gray", vmin=0, vmax=1)
-im_overlay = ax_over.imshow(masks[echo, 0].astype("float32"), cmap="Reds", alpha=0.5, vmin=0, vmax=1)
+im_orig = ax_orig.imshow(imgs[echo, 0], cmap="gray", vmin=0, vmax=1)
+im_mask = ax_mask.imshow(masks[echo, 0].astype("float32"), cmap="gray", vmin=0, vmax=1)
+im_base = ax_over.imshow(imgs[echo, 0], cmap="gray", vmin=0, vmax=1)
+im_overlay = ax_over.imshow(
+    masks[echo, 0].astype("float32"), cmap="Reds", alpha=0.5, vmin=0, vmax=1
+)
 
-ax_orig.set_title("Original",     fontsize=10, pad=4)
+ax_orig.set_title("Original", fontsize=10, pad=4)
 ax_mask.set_title("Mask  (edit)", fontsize=10, pad=4)
-ax_over.set_title("Overlay",      fontsize=10, pad=4)
+ax_over.set_title("Overlay", fontsize=10, pad=4)
 
 # Brush cursor shown on the mask panel
-brush_circle = Circle((0, 0), radius=state["brush_r"], fill=False,
-                       color="cyan", linewidth=1.2, visible=False)
+brush_circle = Circle(
+    (0, 0),
+    radius=state["brush_r"],
+    fill=False,
+    color="cyan",
+    linewidth=1.2,
+    visible=False,
+)
 ax_mask.add_patch(brush_circle)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _status():
     add_mode = state["mode"] == "add"
-    color    = "cyan" if add_mode else "tomato"
-    label    = "ADD" if add_mode else "SUBTRACT"
-    unsaved  = "  *UNSAVED*" if dirty else ""
+    color = "cyan" if add_mode else "tomato"
+    label = "ADD" if add_mode else "SUBTRACT"
+    unsaved = "  *UNSAVED*" if dirty else ""
     status_txt.set_text(
         f"[{label}]  brush={state['brush_r']}px  |  "
         f"A=add  E=erase  [=smaller  ]=larger  Ctrl+Z=undo  Ctrl+S=save  R=zoom reset{unsaved}"
@@ -170,15 +186,15 @@ def _redraw(s=None):
 def _paint(x, y):
     """Apply a circular brush at image-space coordinates (x, y)."""
     global dirty
-    s  = state["cur_slice"]
-    r  = state["brush_r"]
+    s = state["cur_slice"]
+    r = state["brush_r"]
     xi, yi = int(round(x)), int(round(y))
     x0, x1 = max(0, xi - r), min(IMG_W, xi + r + 1)
     y0, y1 = max(0, yi - r), min(IMG_H, yi + r + 1)
     if x1 <= x0 or y1 <= y0:
         return
     gx, gy = np.meshgrid(np.arange(x0, x1), np.arange(y0, y1))
-    in_disk = (gx - xi) ** 2 + (gy - yi) ** 2 <= r ** 2
+    in_disk = (gx - xi) ** 2 + (gy - yi) ** 2 <= r**2
     rows, cols = np.where(in_disk)
     abs_y = rows + y0
     abs_x = cols + x0
@@ -241,21 +257,25 @@ def on_key(event):
 
     if event.key == "a":
         state["mode"] = "add"
-        _status(); fig.canvas.draw_idle()
+        _status()
+        fig.canvas.draw_idle()
 
     elif event.key == "e":
         state["mode"] = "subtract"
-        _status(); fig.canvas.draw_idle()
+        _status()
+        fig.canvas.draw_idle()
 
     elif event.key in ("[", "bracketleft"):
         state["brush_r"] = max(1, state["brush_r"] - 1)
         brush_circle.set_radius(state["brush_r"])
-        _status(); fig.canvas.draw_idle()
+        _status()
+        fig.canvas.draw_idle()
 
     elif event.key in ("]", "bracketright"):
         state["brush_r"] = min(60, state["brush_r"] + 1)
         brush_circle.set_radius(state["brush_r"])
-        _status(); fig.canvas.draw_idle()
+        _status()
+        fig.canvas.draw_idle()
 
     elif event.key == "ctrl+z":
         if undo_stack[s]:
@@ -274,7 +294,11 @@ def on_key(event):
 
     elif event.key == "q":
         if dirty:
-            resp = input("Unsaved changes. Save before quitting? [y/n/c=cancel]: ").strip().lower()
+            resp = (
+                input("Unsaved changes. Save before quitting? [y/n/c=cancel]: ")
+                .strip()
+                .lower()
+            )
             if resp == "y":
                 _save()
             elif resp == "c":
@@ -296,11 +320,11 @@ def on_scroll(event):
 
 # ── Wire events ───────────────────────────────────────────────────────────────
 slider.on_changed(on_slider)
-fig.canvas.mpl_connect("button_press_event",   on_press)
+fig.canvas.mpl_connect("button_press_event", on_press)
 fig.canvas.mpl_connect("button_release_event", on_release)
-fig.canvas.mpl_connect("motion_notify_event",  on_motion)
-fig.canvas.mpl_connect("key_press_event",      on_key)
-fig.canvas.mpl_connect("scroll_event",         on_scroll)
+fig.canvas.mpl_connect("motion_notify_event", on_motion)
+fig.canvas.mpl_connect("key_press_event", on_key)
+fig.canvas.mpl_connect("scroll_event", on_scroll)
 
 _redraw(0)
 plt.show()

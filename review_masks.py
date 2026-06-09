@@ -113,7 +113,7 @@ if classic_files:
     name = input("\nEnter folder name: ").strip()
 
     if name not in available:
-        print(f"\nNot found. Available series:")
+        print("\nNot found. Available series:")
         for a in available:
             print(f"  {a}")
         sys.exit(1)
