@@ -1,19 +1,15 @@
 """
 mask_editor.py
 --------------
-Interactive ortho-slice mask editor for the biceps femoris segmentation
-pipeline -- a viewer with linked XY and XZ panels.
+Interactive ortho-slice mask editor.
+A viewer with linked XY and XZ panels.
 
 The mask volume is (n_echo, Z, Y, X); every echo shares the same anatomy, so
 edits are mirrored to all echoes automatically. The two panels are linked by a
 crosshair:
 
-    XY panel   shows imgs[echo, Z, :, :]        (one anatomical slice)
+    XY panel   shows imgs[echo, Z, :, :]         (one anatomical slice)
     XZ panel   shows imgs[echo, :, Y, :]         (a cross-section sweeping Z)
-
-The XZ panel is the one your friend used to catch the mask bleeding into the
-vastus lateralis around the middle slices -- now you can scrub it deliberately
-and even paint directly in it.
 
 Controls
   Left-drag           paint, in whichever panel the cursor is over
@@ -30,10 +26,16 @@ Controls
   Ctrl+S              save to edited_masks/  (masks_out/ is left untouched)
   Q                   quit (prompts if unsaved)
 
+The display images are upscaled in-plane via Fourier (k-space zero-fill)
+interpolation: IFFT along Y/X, zero-pad the centered spectrum (X and Y only,
+never Z), FFT back. Masks are kept and saved at native resolution; the panels
+align the sharper base image to the mask grid via imshow extents.
+
 Usage:
-    python mask_editor.py
+    python mask_editor.py [--upscale N]   # N=2 default, 1 disables
 """
 
+import argparse
 from pathlib import Path
 from collections import deque
 import shutil
@@ -107,6 +109,30 @@ def read_voxel_spacing(folder):
     py, px = (float(v) for v in getattr(ds, "PixelSpacing", (1.0, 1.0)))
     sz = float(getattr(ds, "SpacingBetweenSlices", getattr(ds, "SliceThickness", 1.0)))
     return sz, py, px
+
+
+def fourier_upscale(imgs, factor=2):
+    """Upscale (E, Z, Y, X) images in-plane by zero-filling k-space.
+
+    Inverse FFT along Y and X only (Z is left untouched -- the 3 mm slice
+    spacing carries no extra information to interpolate), zero-pad the
+    centered spectrum symmetrically, then FFT back.  This is standard MRI
+    zero-fill (sinc) interpolation: values at the original sample positions
+    are preserved exactly, and numpy's 1/N convention on ifftn means no
+    rescaling is needed.  Gibbs ringing can overshoot slightly, so the
+    magnitude is clipped back to [0, 1] for display.
+    """
+    factor = int(factor)
+    if factor <= 1:
+        return imgs
+    axes = (2, 3)
+    _, _, H, W = imgs.shape
+    k = np.fft.fftshift(np.fft.ifftn(imgs, axes=axes), axes=axes)
+    py, px = H * (factor - 1), W * (factor - 1)
+    pad = ((0, 0), (0, 0), (py // 2, py - py // 2), (px // 2, px - px // 2))
+    k = np.pad(k, pad)
+    up = np.fft.fftn(np.fft.ifftshift(k, axes=axes), axes=axes)
+    return np.clip(np.abs(up), 0.0, 1.0).astype(imgs.dtype)
 
 
 # ── Series selection ──────────────────────────────────────────────────────────
@@ -210,13 +236,18 @@ class BlitManager:
 
 # ── Editor ────────────────────────────────────────────────────────────────────
 class OrthoMaskEditor:
-    def __init__(self, name, mask_path, save_path, dicom_path):
+    def __init__(self, name, mask_path, save_path, dicom_path, upscale=2):
         self.name = name
         self.save_path = save_path
 
         print(f"Loading {name} ...")
         self.masks = np.load(mask_path)  # (E, Z, Y, X) bool
         self.imgs = load_dicom_images(str(dicom_path))  # (E, Z, Y, X) float
+
+        self.upscale = max(1, int(upscale))
+        if self.upscale > 1:
+            print(f"Fourier-upscaling display images x{self.upscale} in-plane ...")
+            self.imgs = fourier_upscale(self.imgs, self.upscale)
 
         # Physical aspect for the XZ panel (Z is vertical, X horizontal):
         # each Z step is `sz` mm tall, each X step `sx` mm wide.
@@ -256,9 +287,17 @@ class OrthoMaskEditor:
             ax.set_yticks([])
         self.active_panel = self.ax_xy  # arrow keys act on this panel
 
+        # Upscaled base images are mapped onto the mask's coordinate grid:
+        # upscaled pixel j sits at original coordinate j/f, so its imshow
+        # extent shrinks by half a fine pixel on each side.  Overlays,
+        # painting, crosshairs and sliders all keep working in mask pixels.
+        f = self.upscale
+        ext_xy = (-0.5 / f, self.W - 0.5 / f, self.H - 0.5 / f, -0.5 / f)
+        ext_xz = (-0.5 / f, self.W - 0.5 / f, self.nZ - 0.5, -0.5)
+
         # XY panel ------------------------------------------------------------
         self.im_xy_base = self.ax_xy.imshow(
-            self.imgs[self.echo, self.z], cmap="gray", vmin=0, vmax=1
+            self.imgs[self.echo, self.z], cmap="gray", vmin=0, vmax=1, extent=ext_xy
         )
         self.im_xy_over = self.ax_xy.imshow(
             self._xy_mask(),
@@ -272,7 +311,12 @@ class OrthoMaskEditor:
 
         # XZ panel (rows = Z, cols = X) ---------------------------------------
         self.im_xz_base = self.ax_xz.imshow(
-            self._xz_img(), cmap="gray", vmin=0, vmax=1, aspect=self.xz_aspect
+            self._xz_img(),
+            cmap="gray",
+            vmin=0,
+            vmax=1,
+            aspect=self.xz_aspect,
+            extent=ext_xz,
         )
         self.im_xz_over = self.ax_xz.imshow(
             self._xz_mask(),
@@ -340,7 +384,8 @@ class OrthoMaskEditor:
         return np.ma.masked_where(m == 0, m)
 
     def _xz_img(self):
-        return self.imgs[self.echo, :, self.y_row, :]
+        # imgs rows are upscaled; row y_row*f sits exactly at mask row y_row.
+        return self.imgs[self.echo, :, self.y_row * self.upscale, :]
 
     def _xz_mask(self):
         m = self.masks[self.echo, :, self.y_row, :].astype("float32")
@@ -602,5 +647,15 @@ class OrthoMaskEditor:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Interactive ortho-slice mask editor")
+    parser.add_argument(
+        "--upscale",
+        type=int,
+        default=2,
+        metavar="N",
+        help="in-plane Fourier upscale factor for display images "
+        "(X/Y only, never Z); 1 disables (default: 2)",
+    )
+    args = parser.parse_args()
     name, mask_path, save_path, dicom_path = pick_series()
-    OrthoMaskEditor(name, mask_path, save_path, dicom_path).run()
+    OrthoMaskEditor(name, mask_path, save_path, dicom_path, upscale=args.upscale).run()
