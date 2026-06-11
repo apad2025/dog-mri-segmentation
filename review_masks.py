@@ -1,232 +1,421 @@
 """
 review_masks.py
 ---------------
-Interactive viewer for SAM segmentation results.
+Read-only ortho-slice mask viewer (PyQtGraph).
+
+The viewing half of mask_editor.py: the same linked XY and XZ panels,
+crosshair navigation, sliders and Fourier-upscaled display images, with the
+editing stripped out. Masks can be inspected but never modified, so there
+is no brush, no undo and no saving.
+
+Masks can come from masks_out/ (SAM) or edited_masks/ (edited), in
+either the classic one-file-per-series format (*_mask.npy) or the echo
+format (bf_masks_echo*.npy, one file per echo; set DICOM_SERIES and
+SLICE_OFFSET below to line the masks up with their DICOM volume).
+
+Controls
+  Click/drag (L or R)  move the crosshair (navigate): in XY it picks the XZ
+                       row; in XZ it picks the XY slice
+  Middle-drag          pan the panel
+  Z slider             step through anatomical slices (XY)
+  Y slider             step the XZ cross-section row
+  Up/Down              step the active (hovered) panel
+  Scroll wheel         zoom the panel under the cursor
+  R                    reset zoom on both panels
+  V                    toggle mask overlay
+  Q                    quit
 
 Usage:
-    python review_masks.py
-
-Supports two mask folder formats:
-
-  Classic  (masks_out, masks_out_sam2):
-      Files named  {date}_{series}_mask.npy,  shape (7, 50, H, W).
-      DICOM path is inferred from the filename automatically.
-
-  Echo     (new_masks_sam1_test, etc.):
-      Files named  bf_masks_echo{e:02d}.npy,  shape (n_slices, H, W) each.
-      All echo files are stacked into (n_echoes, n_slices, H, W).
-      Set DICOM_SERIES and SLICE_OFFSET below so the viewer aligns correctly.
-
-FOLDERS:
-20240709_GRE2D_FATWATER_WAYLON_0012 - good
-20240710_GRE2D_FATWATER_SUSHI_0012          range: 13-25
-                                            are slices before making the mask incorrect?
-20240711-1_GRE2D_FATWATER_APHRODITE_0012
-                                            range: 5-37
-                                            over-masked onto part of lateralis (slide 25)
-20240711-2_GRE2D_FATWATER_SELENE_0012
-                                            range: 12-43
-                                            bad at 31 and onward
-20240923_GRE2D_FATWATER_SUSHI_0012
-                                            range: 13-32
-                                            masks are all bad, muscle is hard to find in the images
-20240924_GRE2D_FATWATER_APHRODITE_0012
-                                            range: 8-37
-                                            right leg mask is shifted up, bad mask at 30 so need to mask out stomach
-20240925_GRE2D_FATWATER_WAYLON_0012
-                                            range: 10-37
-                                            did not mask right leg at all, sequence is in reverse order
-20240926_GRE2D_FATWATER_SELENE_0012
-                                            range: 4-30
-                                            masking is good overall, examine slide 26 left leg
-20250113_GRE2D_FATWATER_WAYLON_0012
-                                            range: 8-42
-                                            after slide 30 manually adjust
-20250115_GRE2D_FATWATER_SELENE_0012
-                                            range: 9-39
-                                            left mask is bad
-20250127_GRE2D_FATWATER_APHRODITE_0012
-                                            range: 9-27
-                                            masks seem decent
-20250129_GRE2D_FATWATER_SUSHI_0012
-                                            range: 13-34
-                                            masks are bad past 24
-20250501_GRE2D_FATWATER_WAYLON_0012
-                                            range: 14-49
-                                            mask on right leg around 41 gets rough
-20250502_GRE2D_FATWATER_SELENE_0012
-                                            range: 18-46
-                                            after 32 right leg mask fails
-20250505_GRE2D_FATWATER_APHRODITE_0012
-                                            range: 20-44
-20250506_GRE2D_FATWATER_SUSHI_0012
-                                            range: 16-35
-                                            bad after 24 on the left
+    python review_masks.py [--upscale N]   # N=2 default, 1 disables
 """
 
+import argparse
 from pathlib import Path
 import sys
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.widgets import Slider
 
-from biceps_pipeline import load_dicom_images
+import numpy as np
+import pyqtgraph as pg
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
+
+from mask_editor import (
+    Panel,
+    fourier_upscale,
+    load_dicom_images,
+    read_voxel_spacing,
+)
+
+pg.setConfigOptions(imageAxisOrder="row-major")
+
 
 PROJECT_ROOT = Path(__file__).parent
 DICOM_ROOT = PROJECT_ROOT / "DICOM_Files"
 
-# ── Mask source prompt ────────────────────────────────────────────────────────
-print("Which masks would you like to review?")
-print("  [1] SAM masks in masks_out/")
-print("  [2] Edited masks in edited_masks/")
-_src = input("Choice [1/2]: ").strip()
-if _src == "2":
-    MASK_DIR = PROJECT_ROOT / "edited_masks"
-    _src_label = "edited"
-else:
-    MASK_DIR = PROJECT_ROOT / "masks_out"
-    _src_label = "SAM"
-
-if not MASK_DIR.exists():
-    print(f"Folder not found: {MASK_DIR}")
-    sys.exit(1)
-
-# ── Echo-format settings (only used when MASK_DIR contains bf_masks_echo*.npy) ─
+# ── Echo-format settings (only used when the mask dir contains bf_masks_echo*.npy)
 # Set DICOM_SERIES to the relative path under DICOM_ROOT, e.g.:
 #   "20240709/GRE2D_FATWATER_WAYLON_0012"
 # Set SLICE_OFFSET to the first DICOM slice the masks correspond to, e.g. 13.
 DICOM_SERIES = "20240709/GRE2D_FATWATER_WAYLON_0012"
 SLICE_OFFSET = 0
 
-# ── Detect format and load masks ───────────────────────────────────────────────
-classic_files = sorted(MASK_DIR.glob("*_mask.npy"))
-echo_files = sorted(MASK_DIR.glob("bf_masks_echo*.npy"))
 
-if classic_files:
-    # ── Classic format: one file per series ──────────────────────────────────
-    available = [p.name.replace("_mask.npy", "") for p in classic_files]
+# ── Series selection ──────────────────────────────────────────────────────────
+def pick_mask_dir():
+    print("Which masks would you like to review?")
+    print("  [1] SAM masks in masks_out/")
+    print("  [2] Edited masks in edited_masks/")
+    choice = input("Choice [1/2]: ").strip()
+    if choice == "2":
+        return PROJECT_ROOT / "edited_masks", "edited"
+    return PROJECT_ROOT / "masks_out", "SAM"
 
-    print("Available series:")
-    for name in available:
-        print(f"  {name}")
 
-    name = input("\nEnter folder name: ").strip()
+def load_series():
+    """Prompt for a mask source and series.
 
-    if name not in available:
-        print("\nNot found. Available series:")
-        for a in available:
-            print(f"  {a}")
+    Returns (name, src_label, masks, imgs, xz_aspect) with masks and imgs both
+    shaped (n_echo, Z, Y, X) and imgs normalized to [0, 1].
+    """
+    mask_dir, src_label = pick_mask_dir()
+    if not mask_dir.exists():
+        print(f"Folder not found: {mask_dir}")
         sys.exit(1)
 
-    mask_path = MASK_DIR / f"{name}_mask.npy"
-    date, subseries = name.split("_", 1)
-    dicom_path = DICOM_ROOT / date / subseries
+    classic_files = sorted(mask_dir.glob("*_mask.npy"))
+    echo_files = sorted(mask_dir.glob("bf_masks_echo*.npy"))
 
-    if not dicom_path.exists():
-        print(f"DICOM folder not found: {dicom_path}")
-        sys.exit(1)
+    if classic_files:
+        # ── Classic format: one file per series ──────────────────────────────
+        available = [p.name.replace("_mask.npy", "") for p in classic_files]
+        print("Available series:")
+        for i, n in enumerate(available):
+            print(f"  [{i:2d}] {n}")
 
-    print(f"\nLoading {name} ...")
-    masks = np.load(mask_path)  # (7, 50, H, W)
-    imgs = load_dicom_images(str(dicom_path))  # (7, 50, H, W)
-    echo = 0
+        choice = input("\nEnter folder name or index: ").strip()
+        if choice.isdigit():
+            idx = int(choice)
+            if not (0 <= idx < len(available)):
+                print("Index out of range.")
+                sys.exit(1)
+            name = available[idx]
+        elif choice in available:
+            name = choice
+        else:
+            print("Not found.")
+            sys.exit(1)
 
-elif echo_files:
-    # ── Echo format: one file per echo, stack into (n_echoes, n_slices, H, W) ─
-    echo_arrays = [np.load(p) for p in echo_files]  # each (n_slices, H, W)
-    masks = np.stack(echo_arrays, axis=0)  # (n_echoes, n_slices, H, W)
-    name = MASK_DIR.name
-    echo = 0
-    n_slices = masks.shape[1]
-
-    if DICOM_SERIES:
-        dicom_path = DICOM_ROOT / DICOM_SERIES
+        date, subseries = name.split("_", 1)
+        dicom_path = DICOM_ROOT / date / subseries
         if not dicom_path.exists():
             print(f"DICOM folder not found: {dicom_path}")
             sys.exit(1)
+
         print(f"\nLoading {name} ...")
-        all_imgs = load_dicom_images(str(dicom_path))  # (7, 50, H, W)
-        end = SLICE_OFFSET + n_slices
-        imgs = all_imgs[:, SLICE_OFFSET:end, :, :]  # (7, n_slices, H, W)
-        if imgs.shape[1] < n_slices:
-            print(f"Warning: DICOM only has {all_imgs.shape[1]} slices; "
-                  f"SLICE_OFFSET={SLICE_OFFSET} leaves only {imgs.shape[1]} slices.")
+        masks = np.load(mask_dir / f"{name}_mask.npy")  # (E, Z, Y, X)
+        imgs = load_dicom_images(str(dicom_path))  # (E, Z, Y, X)
+
+    elif echo_files:
+        # ── Echo format: one file per echo, stack into (E, Z, Y, X) ──────────
+        masks = np.stack([np.load(p) for p in echo_files], axis=0)
+        name = mask_dir.name
+        n_slices = masks.shape[1]
+
+        if DICOM_SERIES:
+            dicom_path = DICOM_ROOT / DICOM_SERIES
+            if not dicom_path.exists():
+                print(f"DICOM folder not found: {dicom_path}")
+                sys.exit(1)
+            print(f"\nLoading {name} ...")
+            all_imgs = load_dicom_images(str(dicom_path))  # (E, Z, Y, X)
+            imgs = all_imgs[:, SLICE_OFFSET : SLICE_OFFSET + n_slices]
+            if imgs.shape[1] < n_slices:
+                print(
+                    f"Warning: DICOM only has {all_imgs.shape[1]} slices; "
+                    f"SLICE_OFFSET={SLICE_OFFSET} covers {imgs.shape[1]} of "
+                    f"{n_slices} mask slices -- padding the rest with black."
+                )
+                pad = np.zeros(
+                    (imgs.shape[0], n_slices - imgs.shape[1], *imgs.shape[2:]),
+                    dtype=imgs.dtype,
+                )
+                imgs = np.concatenate([imgs, pad], axis=1)
+        else:
+            print(
+                f"\nLoading {name} (no DICOM -- set DICOM_SERIES to show originals) ..."
+            )
+            dicom_path = None
+            imgs = np.zeros(masks.shape, dtype=np.float32)
+
     else:
-        print(f"\nLoading {name} (no DICOM — set DICOM_SERIES to show originals) ...")
-        H, W = masks.shape[2], masks.shape[3]
-        imgs = np.zeros((masks.shape[0], n_slices, H, W), dtype=np.float32)
+        print(
+            f"No masks found in {mask_dir}\n"
+            f"  Expected '*_mask.npy' (classic) or 'bf_masks_echo*.npy' (echo format)."
+        )
+        sys.exit(1)
 
-else:
-    print(f"No masks found in {MASK_DIR}\n"
-          f"  Expected '*_mask.npy' (classic) or 'bf_masks_echo*.npy' (echo format).")
-    sys.exit(1)
+    # Physical aspect for the XZ panel (Z is vertical, X horizontal).
+    if dicom_path is not None:
+        sz, _sy, sx = read_voxel_spacing(dicom_path)
+        xz_aspect = sz / sx
+    else:
+        xz_aspect = 1.0
 
-# ── Build figure ───────────────────────────────────────────────────────────────
-n_slices = masks.shape[1]
-IMG_H, IMG_W = imgs.shape[2], imgs.shape[3]
-
-fig, axes = plt.subplots(1, 3, figsize=(13, 5))
-plt.subplots_adjust(bottom=0.12, top=0.88)
-
-im_orig = axes[0].imshow(imgs[echo, 0], cmap="gray", vmin=0, vmax=1)
-im_mask = axes[1].imshow(masks[echo, 0], cmap="gray", vmin=0, vmax=1)
-im_base = axes[2].imshow(imgs[echo, 0], cmap="gray", vmin=0, vmax=1)
-im_overlay = axes[2].imshow(np.ma.masked_where(masks[echo, 0] == 0, masks[echo, 0]), cmap="Reds", alpha=0.45, vmin=0, vmax=1)
-
-axes[0].set_title("Original")
-axes[1].set_title("Mask")
-axes[2].set_title("Overlay")
-for ax in axes:
-    ax.axis("off")
-
-title = fig.suptitle(f"{name}  [{_src_label}]  —  slice 0 / {n_slices - 1}", fontsize=11)
-fig.text(0.5, 0.97, "Scroll to zoom  ·  R to reset", ha="center", va="top",
-         fontsize=8, color="gray")
-
-# ── Slider ─────────────────────────────────────────────────────────────────────
-ax_slider = plt.axes([0.15, 0.03, 0.7, 0.03])
-slider = Slider(ax_slider, "Slice", 0, n_slices - 1, valinit=0, valstep=1)
+    return name, src_label, masks, imgs, xz_aspect
 
 
-def update(val):
-    s = int(slider.val)
-    img = imgs[echo, s]
-    mask = masks[echo, s]
+# ── ViewBox with navigate-only mouse bindings ─────────────────────────────────
+class NavViewBox(pg.ViewBox):
+    """ViewBox where left or right click/drag moves the crosshair.
 
-    im_orig.set_data(img)
-    im_mask.set_data(mask)
-    im_base.set_data(img)
-    im_overlay.set_data(np.ma.masked_where(mask == 0, mask))
+    With no painting in the viewer, both buttons navigate.  The viewer assigns
+    `on_navigate(x, y)` after construction.  Wheel zoom is inherited;
+    middle-drag falls through to the default pan behavior.
+    """
 
-    title.set_text(f"{name}  [{_src_label}]  —  slice {s} / {n_slices - 1}")
-    fig.canvas.draw_idle()
+    NAV_BUTTONS = (
+        QtCore.Qt.MouseButton.LeftButton,
+        QtCore.Qt.MouseButton.RightButton,
+    )
+
+    def __init__(self):
+        super().__init__(invertY=True, enableMenu=False)
+        self.on_navigate = None
+
+    def _view_pos(self, ev):
+        p = self.mapSceneToView(ev.scenePos())
+        return p.x(), p.y()
+
+    def mouseClickEvent(self, ev):
+        if ev.button() in self.NAV_BUTTONS:
+            ev.accept()
+            self.on_navigate(*self._view_pos(ev))
+        else:
+            super().mouseClickEvent(ev)
+
+    def mouseDragEvent(self, ev, axis=None):
+        if ev.button() in self.NAV_BUTTONS:
+            ev.accept()
+            self.on_navigate(*self._view_pos(ev))
+        else:
+            super().mouseDragEvent(ev, axis=axis)
 
 
-slider.on_changed(update)
+# ── Viewer ────────────────────────────────────────────────────────────────────
+class OrthoMaskViewer(QtWidgets.QMainWindow):
+    def __init__(self, name, src_label, masks, imgs, xz_aspect, upscale=2):
+        super().__init__()
+        self.name = name
+        self.src_label = src_label
+        self.masks = masks
+        self.imgs = imgs
+        self.xz_aspect = xz_aspect
+
+        self.upscale = max(1, int(upscale))
+        if self.upscale > 1:
+            print(f"Fourier-upscaling display images x{self.upscale} in-plane ...")
+            self.imgs = fourier_upscale(self.imgs, self.upscale)
+
+        self.echo = 0
+        self.n_echo, self.nZ, self.H, self.W = self.masks.shape
+
+        # Crosshair state
+        self.z = 0  # XY slice (start at the first slice)
+        self.y_row = self.H // 2  # XZ cross-section row
+        self.x_col = self.W // 2
+
+        self.mask_visible = True
+
+        self._build_ui()
+        self._structural_update()
+
+    # ── UI construction ──────────────────────────────────────────────────────
+    def _build_ui(self):
+        self.resize(1400, 760)
+
+        central = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(central)
+        self.setCentralWidget(central)
+
+        self.gw = pg.GraphicsLayoutWidget()
+        layout.addWidget(self.gw, stretch=1)
+        self.gw.addLabel("XY  ·  slice", row=0, col=0)
+        self.gw.addLabel("XZ  ·  cross-section", row=0, col=1)
+
+        # Same base-image-to-mask-grid mapping as the editor (upscaled pixel j
+        # sits at original coordinate j/f).  Panel is reused from mask_editor;
+        # its paint callback is never wired to the ViewBoxes and the brush
+        # cursor is never shown, so the masks cannot be modified.
+        f = self.upscale
+        vb_xy, vb_xz = NavViewBox(), NavViewBox()
+        self.gw.addItem(vb_xy, row=1, col=0)
+        self.gw.addItem(vb_xz, row=1, col=1)
+
+        self.panel_xy = Panel(
+            vb_xy,
+            get_base=lambda: self.imgs[self.echo, self.z],
+            get_mask=lambda: self.masks[self.echo, self.z],
+            paint=None,
+            n_rows=self.H,
+            n_cols=self.W,
+            base_rect=QtCore.QRectF(-0.5 / f, -0.5 / f, self.W, self.H),
+        )
+        # XZ panel: rows = Z (native resolution), cols = X (upscaled).
+        self.panel_xz = Panel(
+            vb_xz,
+            get_base=lambda: self.imgs[self.echo, :, self.y_row * self.upscale, :],
+            get_mask=lambda: self.masks[self.echo, :, self.y_row, :],
+            paint=None,
+            n_rows=self.nZ,
+            n_cols=self.W,
+            base_rect=QtCore.QRectF(-0.5 / f, -0.5, self.W, self.nZ),
+            aspect=self.xz_aspect,
+        )
+        self.panels = (self.panel_xy, self.panel_xz)
+        self.active_panel = self.panel_xy  # arrow keys act on this panel
+
+        for panel in self.panels:
+            panel.vb.on_navigate = lambda x, y, p=panel: self._navigate(p, x, y)
+
+        # Sliders -------------------------------------------------------------
+        def make_slider(text, maximum, value, handler):
+            box = QtWidgets.QHBoxLayout()
+            box.addWidget(QtWidgets.QLabel(text))
+            s = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+            s.setRange(0, maximum)
+            s.setValue(value)
+            s.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+            s.valueChanged.connect(handler)
+            box.addWidget(s, stretch=1)
+            label = QtWidgets.QLabel()
+            label.setMinimumWidth(60)
+            box.addWidget(label)
+            return s, label, box
+
+        sliders = QtWidgets.QHBoxLayout()
+        self.s_z, self.lab_z, box_z = make_slider(
+            "Z slice", self.nZ - 1, self.z, self._on_z_slider
+        )
+        self.s_y, self.lab_y, box_y = make_slider(
+            "Y row", self.H - 1, self.y_row, self._on_y_slider
+        )
+        sliders.addLayout(box_z, stretch=1)
+        sliders.addSpacing(20)
+        sliders.addLayout(box_y, stretch=1)
+        layout.addLayout(sliders)
+
+        self.status = QtWidgets.QLabel()
+        self.status.setStyleSheet("font-family: monospace; font-size: 8pt;")
+        self.status.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.statusBar().addWidget(self.status, 1)  # stretch to fill, center text
+        self.status.setText(
+            "[VIEW ONLY]  click=move crosshair  Up/Dn=step active panel  "
+            "V=toggle mask  R=reset zoom  Q=quit"
+        )
+
+        # Focus-follows-mouse across both panels.
+        self.gw.scene().sigMouseMoved.connect(self._on_mouse_moved)
+
+        self._highlight_panels()
+
+        # Keyboard ------------------------------------------------------------
+        for keys, cb in [
+            ("V", self._toggle_mask),
+            ("R", self._reset_zoom),
+            ("Q", self.close),
+            ("Up", lambda: self._step_active(+1)),
+            ("Down", lambda: self._step_active(-1)),
+        ]:
+            QtGui.QShortcut(QtGui.QKeySequence(keys), self).activated.connect(cb)
+
+    def _panel_at(self, scene_pos):
+        """The Panel under the scene position, or None."""
+        for p in self.panels:
+            if p.vb.sceneBoundingRect().contains(scene_pos):
+                return p
+        return None
+
+    # ── drawing ──────────────────────────────────────────────────────────────
+    def _structural_update(self):
+        """Base images / crosshairs / titles changed."""
+        for p in self.panels:
+            p.refresh()
+        self.panel_xy.set_crosshair(self.x_col, self.y_row)  # XZ row marker
+        self.panel_xz.set_crosshair(self.x_col, self.z)  # XY slice marker
+
+        self.lab_z.setText(f"{self.z}/{self.nZ - 1}")
+        self.lab_y.setText(f"{self.y_row}/{self.H - 1}")
+        self.setWindowTitle(
+            f"{self.name}  [{self.src_label}]    Z={self.z}/{self.nZ - 1}   "
+            f"Y={self.y_row}/{self.H - 1}"
+        )
+
+    def _highlight_panels(self):
+        for p in self.panels:
+            p.set_active(p is self.active_panel)
+
+    # ── mouse ────────────────────────────────────────────────────────────────
+    def _on_mouse_moved(self, scene_pos):
+        # Focus-follows-mouse: entering a panel makes it the arrow-key target.
+        panel = self._panel_at(scene_pos)
+        if panel is not None and panel is not self.active_panel:
+            self.active_panel = panel
+            self._highlight_panels()
+
+    def _navigate(self, panel, x, y):
+        """Clicking moves the crosshair, linking the two views."""
+        self.x_col = int(round(np.clip(x, 0, self.W - 1)))
+        if panel is self.panel_xy:
+            self.s_y.setValue(int(round(np.clip(y, 0, self.H - 1))))
+        else:
+            self.s_z.setValue(int(round(np.clip(y, 0, self.nZ - 1))))
+        # setValue only refreshes when the value changed; the X column may
+        # have moved regardless.
+        self._structural_update()
+
+    def _on_z_slider(self, val):
+        self.z = int(val)
+        self._structural_update()
+
+    def _on_y_slider(self, val):
+        self.y_row = int(val)
+        self._structural_update()
+
+    # ── keyboard actions ─────────────────────────────────────────────────────
+    def _toggle_mask(self):
+        self.mask_visible = not self.mask_visible
+        for p in self.panels:
+            p.im_over.setVisible(self.mask_visible)
+
+    def _reset_zoom(self):
+        for p in self.panels:
+            p.reset_zoom()
+
+    def _step_active(self, step):
+        if self.active_panel is self.panel_xz:
+            self.s_y.setValue(int(np.clip(self.y_row + step, 0, self.H - 1)))
+        else:
+            self.s_z.setValue(int(np.clip(self.z + step, 0, self.nZ - 1)))
 
 
-def on_scroll(event):
-    if event.inaxes not in axes:
-        return
-    factor = 0.75 if event.button == "up" else 1.33
-    cx, cy = event.xdata, event.ydata
-    for ax in axes:
-        xlim = ax.get_xlim()
-        ylim = ax.get_ylim()
-        ax.set_xlim([cx + (x - cx) * factor for x in xlim])
-        ax.set_ylim([cy + (y - cy) * factor for y in ylim])
-    fig.canvas.draw_idle()
+def main():
+    parser = argparse.ArgumentParser(description="Read-only ortho-slice mask viewer")
+    parser.add_argument(
+        "--upscale",
+        type=int,
+        default=2,
+        metavar="N",
+        help="in-plane Fourier upscale factor for display images "
+        "(X/Y only, never Z); 1 disables (default: 2)",
+    )
+    args = parser.parse_args()
+    name, src_label, masks, imgs, xz_aspect = load_series()
+
+    app = QtWidgets.QApplication(sys.argv)
+    viewer = OrthoMaskViewer(
+        name, src_label, masks, imgs, xz_aspect, upscale=args.upscale
+    )
+    viewer.show()
+    sys.exit(app.exec())
 
 
-def on_key(event):
-    if event.key == "r":
-        for ax in axes:
-            ax.set_xlim(-0.5, IMG_W - 0.5)
-            ax.set_ylim(IMG_H - 0.5, -0.5)
-        fig.canvas.draw_idle()
-
-
-fig.canvas.mpl_connect("scroll_event", on_scroll)
-fig.canvas.mpl_connect("key_press_event", on_key)
-
-plt.show()
+if __name__ == "__main__":
+    main()
