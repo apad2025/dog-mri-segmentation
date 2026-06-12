@@ -6,6 +6,7 @@
 DICOM_Files/
 masks_out*/
 edited_masks/
+DICOM_Files_upscaled/
 mat_out/
 *.nrrd
 

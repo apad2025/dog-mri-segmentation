@@ -39,8 +39,8 @@ else:
 
 # ── Convert ───────────────────────────────────────────────────────────────────
 for mask_path in selected:
-    mask_4d = np.load(mask_path)  # (7, 50, 192, 192) bool
-    mask_3d = mask_4d[0].astype(bool)  # (50, 192, 192) logical for MATLAB
+    mask_4d = np.load(mask_path)  # (7, 50, 384, 384) bool
+    mask_3d = mask_4d[0].astype(bool)  # (50, 384, 384) logical for MATLAB
 
     out_path = MAT_DIR / mask_path.name.replace("_mask.npy", "_mask.mat")
     scipy.io.savemat(out_path, {"mask": mask_3d})

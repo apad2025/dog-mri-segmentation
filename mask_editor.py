@@ -30,16 +30,17 @@ Controls
   Ctrl+S              save to edited_masks/  (masks_out/ is left untouched)
   Q                   quit (prompts if unsaved)
 
-The display images are upscaled in-plane via Fourier (k-space zero-fill)
-interpolation: IFFT along Y/X, zero-pad the centered spectrum (X and Y only,
-never Z), FFT back. Masks are kept and saved at native resolution; the panels
-align the sharper base image to the mask grid via ImageItem rects.
+Images and masks are expected to already be 2x Fourier-upscaled on disk by
+fourier_upscale.py (run once): the upscaled DICOMs live in
+DICOM_Files_upscaled/ and the masks are pixel-doubled in place. Because both
+now share the same fine grid, the editor loads them directly with no per-open
+upscaling and the overlay aligns 1:1 with the base image. If the upscaled
+DICOM mirror is missing, the editor falls back to the original DICOM_Files/.
 
 Usage:
-    python mask_editor.py [--upscale N]   # N=2 default, 1 disables
+    python mask_editor.py
 """
 
-import argparse
 from pathlib import Path
 from collections import deque
 import shutil
@@ -55,6 +56,7 @@ pg.setConfigOptions(imageAxisOrder="row-major")
 
 PROJECT_ROOT = Path(__file__).parent
 DICOM_ROOT = PROJECT_ROOT / "DICOM_Files"
+UPSCALED_DICOM_ROOT = PROJECT_ROOT / "DICOM_Files_upscaled"
 MASK_DIR = PROJECT_ROOT / "masks_out"
 EDITED_MASK_DIR = PROJECT_ROOT / "edited_masks"
 
@@ -63,12 +65,12 @@ MASK_LUT = np.array([[0, 0, 0, 0], [220, 40, 40, 130]], dtype=np.uint8)
 
 
 # ── Lightweight DICOM loader (pydicom only) ───────────────────────────────────
-def load_dicom_images(
-    folder, *, n_echo=7, n_slices=50, shape=(192, 192), dtype=np.float32
-):
+def load_dicom_images(folder, *, n_echo=7, n_slices=50, dtype=np.float32):
     """Return imgs of shape (n_echo, n_slices, H, W), normalized to [0, 1].
 
-    Files are binned by their DICOM EchoNumbers tag, matching the pipeline.
+    Files are binned by their DICOM EchoNumbers tag, matching the pipeline. The
+    in-plane size (H, W) is read from the data, so the upscaled mirror (384x384)
+    and the original DICOMs (192x192) both load without changes here.
     """
     folder = Path(folder)
     files = sorted(p for p in folder.iterdir() if p.is_file())
@@ -78,7 +80,7 @@ def load_dicom_images(
             f"Found {len(files)} files in {folder.name}, expected {expected}."
         )
 
-    H, W = shape
+    H, W = pydicom.dcmread(str(files[0]), force=True).pixel_array.shape
     imgs = np.zeros((n_echo, n_slices, H, W), dtype=dtype)
     next_slice = np.zeros(n_echo, dtype=int)
 
@@ -115,30 +117,6 @@ def read_voxel_spacing(folder):
     py, px = (float(v) for v in getattr(ds, "PixelSpacing", (1.0, 1.0)))
     sz = float(getattr(ds, "SpacingBetweenSlices", getattr(ds, "SliceThickness", 1.0)))
     return sz, py, px
-
-
-def fourier_upscale(imgs, factor=2):
-    """Upscale (E, Z, Y, X) images in-plane by zero-filling k-space.
-
-    Inverse FFT along Y and X only (Z is left untouched -- the 3 mm slice
-    spacing carries no extra information to interpolate), zero-pad the
-    centered spectrum symmetrically, then FFT back.  This is standard
-    zero-fill (sinc) interpolation: values at the original sample positions
-    are preserved exactly, and numpy's 1/N convention on ifftn means no
-    rescaling is needed.  Gibbs ringing can overshoot slightly, so the
-    magnitude is clipped back to [0, 1] for display.
-    """
-    factor = int(factor)
-    if factor <= 1:
-        return imgs
-    axes = (2, 3)
-    _, _, H, W = imgs.shape
-    k = np.fft.fftshift(np.fft.ifftn(imgs, axes=axes), axes=axes)
-    py, px = H * (factor - 1), W * (factor - 1)
-    pad = ((0, 0), (0, 0), (py // 2, py - py // 2), (px // 2, px - px // 2))
-    k = np.pad(k, pad)
-    up = np.fft.fftn(np.fft.ifftshift(k, axes=axes), axes=axes)
-    return np.clip(np.abs(up), 0.0, 1.0).astype(imgs.dtype)
 
 
 # ── Series selection ──────────────────────────────────────────────────────────
@@ -185,7 +163,15 @@ def pick_series():
     edited_path = EDITED_MASK_DIR / f"{name}_mask.npy"
     mask_path = edited_path if edited_path.exists() else MASK_DIR / f"{name}_mask.npy"
     date, subseries = name.split("_", 1)
-    dicom_path = DICOM_ROOT / date / subseries
+    # Prefer the upscaled mirror (fourier_upscale.py); fall back to originals.
+    dicom_path = UPSCALED_DICOM_ROOT / date / subseries
+    if not dicom_path.exists():
+        dicom_path = DICOM_ROOT / date / subseries
+        print(
+            f"Note: upscaled DICOMs not found; using originals at {dicom_path}.\n"
+            f"      Run 'python fourier_upscale.py' for the sharper, "
+            f"resolution-matched view."
+        )
     if not dicom_path.exists():
         print(f"DICOM folder not found: {dicom_path}")
         sys.exit(1)
@@ -365,7 +351,7 @@ class Panel:
 
 # ── Editor ────────────────────────────────────────────────────────────────────
 class OrthoMaskEditor(QtWidgets.QMainWindow):
-    def __init__(self, name, mask_path, save_path, dicom_path, upscale=2):
+    def __init__(self, name, mask_path, save_path, dicom_path):
         super().__init__()
         self.name = name
         self.save_path = save_path
@@ -374,10 +360,12 @@ class OrthoMaskEditor(QtWidgets.QMainWindow):
         self.masks = np.load(mask_path)  # (E, Z, Y, X) bool
         self.imgs = load_dicom_images(str(dicom_path))  # (E, Z, Y, X) float
 
-        self.upscale = max(1, int(upscale))
-        if self.upscale > 1:
-            print(f"Fourier-upscaling display images x{self.upscale} in-plane ...")
-            self.imgs = fourier_upscale(self.imgs, self.upscale)
+        if self.imgs.shape[2:] != self.masks.shape[2:]:
+            raise ValueError(
+                f"Image grid {self.imgs.shape[2:]} != mask grid "
+                f"{self.masks.shape[2:]}. Run 'python fourier_upscale.py' so "
+                f"both share the same upscaled grid."
+            )
 
         # Physical aspect for the XZ panel (Z is vertical, X horizontal):
         # each Z step is `sz` mm tall, each X step `sx` mm wide.
@@ -418,11 +406,9 @@ class OrthoMaskEditor(QtWidgets.QMainWindow):
         self.gw.addLabel("XY  ·  edit", row=0, col=0)
         self.gw.addLabel("XZ  ·  cross-section", row=0, col=1)
 
-        # Upscaled base images are mapped onto the mask's coordinate grid:
-        # upscaled pixel j sits at original coordinate j/f, so its rect
-        # shrinks by half a fine pixel on each side.  Overlays, painting,
-        # crosshairs and sliders all keep working in mask pixels.
-        f = self.upscale
+        # Images and masks share one grid (both upscaled on disk), so the base
+        # image, overlay, painting, crosshairs and sliders all use the same
+        # pixel coordinates -- pixel centers at integers, rect offset by -0.5.
         vb_xy, vb_xz = PanelViewBox(), PanelViewBox()
         self.gw.addItem(vb_xy, row=1, col=0)
         self.gw.addItem(vb_xz, row=1, col=1)
@@ -434,19 +420,18 @@ class OrthoMaskEditor(QtWidgets.QMainWindow):
             paint=self._paint_xy,
             n_rows=self.H,
             n_cols=self.W,
-            base_rect=QtCore.QRectF(-0.5 / f, -0.5 / f, self.W, self.H),
+            base_rect=QtCore.QRectF(-0.5, -0.5, self.W, self.H),
             brush_r=self.brush_r,
         )
-        # XZ panel: rows = Z (native resolution), cols = X (upscaled).
-        # imgs rows are upscaled; row y_row*f sits exactly at mask row y_row.
+        # XZ panel: rows = Z (never upscaled), cols = X.
         self.panel_xz = Panel(
             vb_xz,
-            get_base=lambda: self.imgs[self.echo, :, self.y_row * self.upscale, :],
+            get_base=lambda: self.imgs[self.echo, :, self.y_row, :],
             get_mask=lambda: self.masks[self.echo, :, self.y_row, :],
             paint=self._paint_xz,
             n_rows=self.nZ,
             n_cols=self.W,
-            base_rect=QtCore.QRectF(-0.5 / f, -0.5, self.W, self.nZ),
+            base_rect=QtCore.QRectF(-0.5, -0.5, self.W, self.nZ),
             aspect=self.xz_aspect,
             brush_r=self.brush_r,
         )
@@ -491,7 +476,6 @@ class OrthoMaskEditor(QtWidgets.QMainWindow):
         self.status.setStyleSheet("font-family: monospace; font-size: 8pt;")
         self.status.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.statusBar().addWidget(self.status, 1)  # stretch to fill, center text
-
 
         # Brush tracking + focus-follows-mouse across both panels.
         self.gw.scene().sigMouseMoved.connect(self._on_mouse_moved)
@@ -709,20 +693,10 @@ class OrthoMaskEditor(QtWidgets.QMainWindow):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Interactive ortho-slice mask editor")
-    parser.add_argument(
-        "--upscale",
-        type=int,
-        default=2,
-        metavar="N",
-        help="in-plane Fourier upscale factor for display images "
-        "(X/Y only, never Z); 1 disables (default: 2)",
-    )
-    args = parser.parse_args()
     name, mask_path, save_path, dicom_path = pick_series()
 
     app = QtWidgets.QApplication(sys.argv)
-    editor = OrthoMaskEditor(name, mask_path, save_path, dicom_path, upscale=args.upscale)
+    editor = OrthoMaskEditor(name, mask_path, save_path, dicom_path)
     editor.show()
     sys.exit(app.exec())
 
