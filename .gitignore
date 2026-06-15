@@ -7,6 +7,7 @@ DICOM_Files/
 masks_out*/
 edited_masks/
 DICOM_Files_upscaled/
+water_fat_separation/
 mat_out/
 *.nrrd
 
