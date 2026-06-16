@@ -25,6 +25,7 @@ Controls
   [ / ]               brush radius -1 / +1
   Scroll wheel        zoom the panel under the cursor
   R                   reset zoom on both panels
+  C                   copy previous Z slice's mask onto the current slice
   V                   toggle mask overlay
   Ctrl+Z              undo last stroke
   Ctrl+S              save to edited_masks/  (masks_out/ is left untouched)
@@ -489,6 +490,7 @@ class OrthoMaskEditor(QtWidgets.QMainWindow):
             ("E", lambda: self._set_mode("subtract")),
             ("[", lambda: self._set_brush_r(self.brush_r - 1)),
             ("]", lambda: self._set_brush_r(self.brush_r + 1)),
+            ("C", self._copy_prev_frame),
             ("V", self._toggle_mask),
             ("R", self._reset_zoom),
             ("Q", self.close),
@@ -541,8 +543,8 @@ class OrthoMaskEditor(QtWidgets.QMainWindow):
         self.status.setText(
             f"[{'ADD' if add else 'ERASE'}]  brush={self.brush_r}px   "
             f"L-drag=paint  R-click=move crosshair  Up/Dn=step active panel  "
-            f"A/E=add/erase  [ ]=size  V=toggle mask  Ctrl+Z=undo  "
-            f"Ctrl+S=save  R=reset  Q=quit{flag}"
+            f"A/E=add/erase  [ ]=size  C=copy prev slice  V=toggle mask  "
+            f"Ctrl+Z=undo  Ctrl+S=save  R=reset  Q=quit{flag}"
         )
         self.status.setStyleSheet(
             "font-family: monospace; font-size: 8pt; "
@@ -654,6 +656,20 @@ class OrthoMaskEditor(QtWidgets.QMainWindow):
             self.s_y.setValue(int(np.clip(self.y_row + step, 0, self.H - 1)))
         else:
             self.s_z.setValue(int(np.clip(self.z + step, 0, self.nZ - 1)))
+
+    def _copy_prev_frame(self):
+        """Replace the current Z slice's mask with the previous slice's.
+
+        Useful when adjacent slices are nearly identical: copy then touch up.
+        The overwrite is captured on the undo stack like a paint stroke.
+        """
+        if self.z == 0:
+            return
+        backup = {self.z: self.masks[:, self.z].copy()}
+        self.masks[:, self.z] = self.masks[:, self.z - 1]
+        self.undo_stack.append(backup)
+        self.dirty = True
+        self._structural_update()
 
     # ── actions ──────────────────────────────────────────────────────────────
     def _undo(self):
