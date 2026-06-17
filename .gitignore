@@ -7,7 +7,8 @@ DICOM_Files/
 masks_out*/
 edited_masks/
 DICOM_Files_upscaled/
-water_fat_separation/
+water_fat_separation/*
+!water_fat_separation/wfs_to_mask_editor.py
 mat_out/
 *.nrrd
 
