@@ -31,6 +31,14 @@ Controls
   Ctrl+S              save to edited_masks/  (masks_out/ is left untouched)
   Q                   quit (prompts if unsaved)
 
+Water/fat-separated series share one mask. A series that has been run through
+water_fat_separation/wfs_to_mask_editor.py shows up three times -- the unaltered
+series plus its "..._WATER" and "..._FAT" variants -- and you can open any of
+them to segment on whichever image is clearest. The anatomy (and therefore the
+mask) is identical across the three, so all three edit and save the single base
+"<series>_mask.npy"; the per-variant "..._WATER_mask.npy" / "..._FAT_mask.npy"
+files are left untouched.
+
 Images and masks are expected to already be 2x Fourier-upscaled on disk by
 fourier_upscale.py (run once): the upscaled DICOMs live in
 DICOM_Files_upscaled/ and the masks are pixel-doubled in place. Because both
@@ -121,6 +129,25 @@ def read_voxel_spacing(folder):
 
 
 # ── Series selection ──────────────────────────────────────────────────────────
+# Suffixes added by wfs_to_mask_editor.py for the water/fat-separated variants.
+WFS_SUFFIXES = ("_WATER", "_FAT")
+
+
+def canonical_mask_name(name):
+    """Map a series variant to the series that owns its editable mask.
+
+    Water/fat separation produces three views of one anatomy -- the unaltered
+    series plus ``..._WATER`` / ``..._FAT`` -- and the mask is identical across
+    all three. So the variants share the base series' mask: editing any of them
+    reads and writes the single ``<base>_mask.npy``, and the per-variant
+    ``..._WATER_mask.npy`` / ``..._FAT_mask.npy`` files are never touched.
+    """
+    for suffix in WFS_SUFFIXES:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
 def pick_series():
     EDITED_MASK_DIR.mkdir(exist_ok=True)
     mask_files = sorted(MASK_DIR.glob("*_mask.npy"))
@@ -128,7 +155,25 @@ def pick_series():
         print(f"No *_mask.npy files found in {MASK_DIR}")
         sys.exit(1)
 
-    uncopied = [f for f in mask_files if not (EDITED_MASK_DIR / f.name).exists()]
+    # List every base series (those with a mask) and, right after each, any of
+    # its water/fat-separated variants. A variant is openable whenever its
+    # upscaled DICOM folder exists -- it needs no mask file of its own, since it
+    # shares the base series' mask (see canonical_mask_name).
+    available = []
+    for base in (p.name.replace("_mask.npy", "") for p in mask_files):
+        available.append(base)
+        date, subseries = base.split("_", 1)
+        for suffix in WFS_SUFFIXES:
+            if (UPSCALED_DICOM_ROOT / date / f"{subseries}{suffix}").exists():
+                available.append(f"{base}{suffix}")
+
+    # Only the canonical (base) masks are editable; back those up to
+    # edited_masks/ and leave the redundant water/fat copies alone.
+    canonical_files = sorted(
+        {MASK_DIR / f"{canonical_mask_name(n)}_mask.npy" for n in available}
+    )
+    canonical_files = [f for f in canonical_files if f.exists()]
+    uncopied = [f for f in canonical_files if not (EDITED_MASK_DIR / f.name).exists()]
     if uncopied:
         resp = (
             input(
@@ -143,10 +188,11 @@ def pick_series():
                 shutil.copy2(f, EDITED_MASK_DIR / f.name)
             print(f"Copied {len(uncopied)} mask(s) to {EDITED_MASK_DIR}")
 
-    available = [p.name.replace("_mask.npy", "") for p in mask_files]
     print("Available series:")
     for i, n in enumerate(available):
-        print(f"  [{i:2d}] {n}")
+        cn = canonical_mask_name(n)
+        note = f"   (shares {cn} mask)" if cn != n else ""
+        print(f"  [{i:2d}] {n}{note}")
 
     choice = input("\nEnter folder name or index: ").strip()
     if choice.isdigit():
@@ -161,8 +207,14 @@ def pick_series():
         print("Not found.")
         sys.exit(1)
 
-    edited_path = EDITED_MASK_DIR / f"{name}_mask.npy"
-    mask_path = edited_path if edited_path.exists() else MASK_DIR / f"{name}_mask.npy"
+    # The image comes from the chosen variant, but the mask is the shared base
+    # one. Fall back to the variant's own mask if the base mask is missing.
+    mask_name = canonical_mask_name(name)
+    edited_path = EDITED_MASK_DIR / f"{mask_name}_mask.npy"
+    if not edited_path.exists() and not (MASK_DIR / f"{mask_name}_mask.npy").exists():
+        mask_name = name
+        edited_path = EDITED_MASK_DIR / f"{mask_name}_mask.npy"
+    mask_path = edited_path if edited_path.exists() else MASK_DIR / f"{mask_name}_mask.npy"
     date, subseries = name.split("_", 1)
     # Prefer the upscaled mirror (fourier_upscale.py); fall back to originals.
     dicom_path = UPSCALED_DICOM_ROOT / date / subseries
