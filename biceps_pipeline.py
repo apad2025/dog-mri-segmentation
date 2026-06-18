@@ -2,24 +2,20 @@
 biceps_pipeline.py
 ==================
 
-Turns the single-slice notebook flow into a batch pipeline that masks the
-biceps femoris across every slice, echo, and series.
+DICOM loading + classical detection helpers for muscle segmentation.
 
-Pipeline per slice (same logic as the notebook, just refactored into functions
-that RETURN results instead of plotting / raising):
+This was originally a full SAM (vit_l) batch pipeline; the SAM stage has been
+dropped now that segmentation is done by sam2_segmentation.ipynb.
+What remains are the pieces that notebook imports:
 
-    load -> foreground mask -> bone mask -> crotch cut
-         -> per-leg bounding boxes -> SAM box prompt -> combined mask
+    load_dicom_images -> foreground_mask -> bone_mask -> crotch_cut -> leg_boxes
 
-Key ideas for scaling (see summary.md):
-  * Each series folder = 350 DICOMs = 7 echoes x 50 anatomical slices.
-  * The anatomy is identical across echoes, so segment ONE echo's 50 slices,
-    then reuse that 50-slice mask volume for all 7 echoes (~7x less work).
-  * Loop that over every GRE2D_FATWATER_*_0012 (magnitude) folder.
+The notebook runs this detection sequence on a single middle "seed" slice to
+get the per-leg bounding boxes, then lets SAM2 propagate the mask through the
+stack.
 
-This file is a scaffold: the thresholds / sizes are copied from the notebook
-and WILL need tuning per dog. Functions never crash the batch -- a slice that
-fails detection is recorded in a report so you can fix those by hand.
+The thresholds / sizes are copied from the original notebook and may need
+tuning per dog.
 """
 
 from pathlib import Path
@@ -38,14 +34,14 @@ from scipy.ndimage import binary_fill_holes
 # 1. LOADING  (your load_dicom_images, lightly hardened)
 # ----------------------------------------------------------------------------
 def load_dicom_images(
-    folder,
-    *,
-    n_echo: int = 7,
-    n_slices_per_echo: int = 50,
-    shape=(192, 192),
-    dtype=np.float32,
-    mode: str = "magnitude",
-    normalize_mag: bool = True,
+        folder,
+        *,
+        n_echo: int = 7,
+        n_slices_per_echo: int = 50,
+        shape=(192, 192),
+        dtype=np.float32,
+        mode: str = "magnitude",
+        normalize_mag: bool = True,
 ):
     """Return imgs with shape (n_echo, n_slices_per_echo, H, W).
 
@@ -121,7 +117,7 @@ def bone_mask(mag, *, dark_thresh=0.23, area_threshold=15, circularity_min=0.5):
             continue
         circ = (4 * np.pi * region.area) / (region.perimeter ** 2)
         if region.area > area_threshold and circ > circularity_min:
-            out[tuple(region.coords.T)] = True       # vectorised vs the per-pixel loop
+            out[tuple(region.coords.T)] = True  # vectorised vs the per-pixel loop
     return binary_fill_holes(out)
 
 
@@ -133,7 +129,7 @@ def crotch_cut(fgrnd, bone_grown, *, taper_ratio=0.45, dilation_radius=2):
     lab = label(bone_grown, connectivity=2)
     props = sorted(regionprops(lab), key=lambda r: r.area, reverse=True)
     if len(props) < 2:
-        return None                                  # <-- was a hard raise; now skip
+        return None  # <-- was a hard raise; now skip
     props = sorted(props[:2], key=lambda r: r.centroid[1])
     left_bone = lab == props[0].label
     right_bone = lab == props[1].label
@@ -174,12 +170,11 @@ def leg_boxes(masked_img, bone_grown):
     bi = masked_img > threshold_otsu(masked_img)
     H, W = masked_img.shape
 
-    leg_props = sorted(regionprops(label(bi, connectivity=2)),
-                       key=lambda r: r.area, reverse=True)
+    lab_leg = label(bi, connectivity=2)
+    leg_props = sorted(regionprops(lab_leg), key=lambda r: r.area, reverse=True)
     if len(leg_props) < 2:
         return None
     leg_props = sorted(leg_props[:2], key=lambda r: r.centroid[1])
-    lab_leg = label(bi, connectivity=2)
     left_leg = lab_leg == leg_props[0].label
     right_leg = lab_leg == leg_props[1].label
 
@@ -229,132 +224,3 @@ def leg_boxes(masked_img, bone_grown):
 
     return [order_box(*left_top, xL_out, yL_bot),
             order_box(*right_top, xR_out, yR_bot)]
-
-
-# ----------------------------------------------------------------------------
-# 3. SAM  (cell 14, factored so the model loads ONCE)
-# ----------------------------------------------------------------------------
-def build_predictor(checkpoint, model_type="vit_l"):
-    """Create the SAM predictor a single time and reuse it for every slice."""
-    from segment_anything import sam_model_registry, SamPredictor
-    sam = sam_model_registry[model_type](checkpoint=str(checkpoint))
-    sam.to("cuda")   # <-- uncomment if you have a GPU; vit_l is slow on CPU
-    return SamPredictor(sam)
-
-
-def _to_uint8_rgb(img):
-    """SAM expects an HxWx3 uint8 image. The notebook fed it float [0,1],
-    which SAM misinterprets -- fixing that here usually improves masks."""
-    img = np.nan_to_num(img)
-    mx = img.max()
-    u8 = (img / mx * 255).astype(np.uint8) if mx > 0 else img.astype(np.uint8)
-    return np.stack([u8, u8, u8], axis=-1)
-
-
-def sam_masks(predictor, masked_img, boxes):
-    """Return combined boolean biceps-femoris mask for one slice."""
-    predictor.set_image(_to_uint8_rgb(masked_img))
-    H, W = masked_img.shape
-    combined = np.zeros((H, W), dtype=bool)
-    for box in boxes:
-        masks, _, _ = predictor.predict(
-            point_coords=None, point_labels=None,
-            box=np.array(box), multimask_output=False,
-        )
-        combined |= masks[0].astype(bool)
-    return combined
-
-
-# ----------------------------------------------------------------------------
-# 4. ONE SLICE END-TO-END
-# ----------------------------------------------------------------------------
-def segment_slice(mag, predictor):
-    """Run the whole flow on one magnitude slice.
-
-    Returns (mask, status). mask is None when a stage fails; status is a short
-    string you can log so you know which slices need manual attention.
-    """
-    fg = foreground_mask(mag)
-    bone = bone_mask(mag)
-    fgrnd_mask = mag * (fg & ~bone)
-
-    body_cut = crotch_cut(fg, bone)
-    if body_cut is None:
-        return None, "crotch_cut_failed (need exactly 2 femurs)"
-    masked_img = fgrnd_mask * body_cut
-
-    boxes = leg_boxes(masked_img, bone)
-    if boxes is None:
-        return None, "boxes_failed (couldn't assign 2 legs)"
-
-    mask = sam_masks(predictor, masked_img, boxes)
-    return mask, "ok"
-
-
-# ----------------------------------------------------------------------------
-# 5. ONE SERIES  (50 slices of one echo, then broadcast to all echoes)
-# ----------------------------------------------------------------------------
-def segment_series(folder, predictor, *, echo=0, n_echo=7, n_slices=50, shape=(192, 192)):
-    """Segment one GRE2D_FATWATER_*_0012 folder.
-
-    Returns:
-      mask_volume    : (n_slices, H, W)  one mask per anatomical slice
-      mask_all_echoes: (n_echo, n_slices, H, W)  same mask reused per echo
-      report         : list of (slice_index, status)
-    """
-    imgs = load_dicom_images(folder, n_echo=n_echo, n_slices_per_echo=n_slices, shape=shape)
-    H, W = shape
-    mask_volume = np.zeros((n_slices, H, W), dtype=bool)
-    report = []
-    # for s in range(n_slices):
-    #     mask, status = segment_slice(imgs[echo, s], predictor)
-    #     if mask is not None:
-    #         mask_volume[s] = mask
-    #     report.append((s, status))
-
-    for s in range(n_slices):
-        print(f"Processing slice {s + 1}/{n_slices}")
-        mask, status = segment_slice(imgs[echo, s], predictor)
-        if mask is not None:
-            mask_volume[s] = mask
-        report.append((s, status))
-
-    # Anatomy is identical across echoes -> reuse the same mask for all 7.
-    mask_all_echoes = np.broadcast_to(mask_volume, (n_echo, n_slices, H, W)).copy()
-    return mask_volume, mask_all_echoes, report
-
-
-# ----------------------------------------------------------------------------
-# 6. ALL SERIES
-# ----------------------------------------------------------------------------
-def process_all(dicom_root, predictor, out_dir, *, echo=0, pattern="*GRE2D_FATWATER*0012"):
-    """Walk every magnitude series under dicom_root and save a mask volume each.
-
-    Outputs <out_dir>/<series_name>_mask.npy  (n_echo, 50, H, W) and prints a
-    per-series success count so you can see which need manual cleanup.
-    """
-    dicom_root = Path(dicom_root)
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    series_folders = sorted(p for p in dicom_root.rglob(pattern) if p.is_dir())
-    summary = []
-    for folder in series_folders:
-        try:
-            _, mask_all, report = segment_series(folder, predictor, echo=echo)
-        except Exception as e:                       # keep the batch alive
-            summary.append((folder.name, f"LOAD ERROR: {e}"))
-            continue
-        n_ok = sum(1 for _, st in report if st == "ok")
-        name = f"{folder.parent.name}_{folder.name}"
-        np.save(out_dir / f"{name}_mask.npy", mask_all)
-        summary.append((name, f"{n_ok}/50 slices ok"))
-        print(f"{name}: {n_ok}/50 slices segmented")
-    return summary
-
-
-if __name__ == "__main__":
-    # Example wiring (edit paths):
-    #   pred = build_predictor(r"C:\...\sam_vit_l_0b3195.pth")
-    #   process_all(r"C:\...\DICOM_Files", pred, r"C:\...\masks_out")
-    print("Import this module and call build_predictor() then process_all().")

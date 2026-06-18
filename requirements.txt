@@ -6,7 +6,6 @@ PyQt6_sip==13.11.1
 pyqtgraph==0.14.0
 scikit-image==0.26.0
 scipy==1.17.0
-segment-anything==1.0
 matplotlib==3.10.9
 matplotlib-inline==0.1.7
 # Install torch separately with pip install torch --index-url https://download.pytorch.org/whl/cu121
