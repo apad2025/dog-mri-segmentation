@@ -12,8 +12,9 @@ water_fat_separation/*
 mat_out/
 *.nrrd
 
-# Generated QC images
+# Generated QC images (keep the README screenshot)
 *.png
+!screenshot.png
 
 # Python
 .venv/
