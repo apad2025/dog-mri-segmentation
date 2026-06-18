@@ -39,16 +39,17 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from mask_editor import (
     Panel,
-    fourier_upscale,
     load_dicom_images,
     read_voxel_spacing,
 )
+from fourier_upscale import fourier_upscale_2d
 
 pg.setConfigOptions(imageAxisOrder="row-major")
 
 
 PROJECT_ROOT = Path(__file__).parent
 DICOM_ROOT = PROJECT_ROOT / "DICOM_Files"
+UPSCALED_DICOM_ROOT = PROJECT_ROOT / "DICOM_Files_upscaled"
 
 # ── Echo-format settings (only used when the mask dir contains bf_masks_echo*.npy)
 # Set DICOM_SERIES to the relative path under DICOM_ROOT, e.g.:
@@ -56,6 +57,26 @@ DICOM_ROOT = PROJECT_ROOT / "DICOM_Files"
 # Set SLICE_OFFSET to the first DICOM slice the masks correspond to, e.g. 13.
 DICOM_SERIES = "20240709/GRE2D_FATWATER_WAYLON_0012"
 SLICE_OFFSET = 0
+
+
+# ── Display upscaling ─────────────────────────────────────────────────────────
+def fourier_upscale(imgs, factor):
+    """In-plane Fourier upscale of an (E, Z, Y, X) volume by `factor`.
+
+    The echo and Z axes are left untouched, matching how fourier_upscale.py
+    upscales the masks on disk; this brings the display images onto the same
+    fine grid when they were not pre-upscaled.
+    """
+    factor = int(factor)
+    if factor <= 1:
+        return imgs
+    n_echo, nz, ny, nx = imgs.shape
+    out = np.empty((n_echo, nz, ny * factor, nx * factor), dtype=imgs.dtype)
+    for e in range(n_echo):
+        for z in range(nz):
+            up = fourier_upscale_2d(imgs[e, z], factor)
+            out[e, z] = np.clip(up, 0.0, 1.0).astype(imgs.dtype, copy=False)
+    return out
 
 
 # ── Series selection ──────────────────────────────────────────────────────────
@@ -104,7 +125,11 @@ def load_series():
             sys.exit(1)
 
         date, subseries = name.split("_", 1)
-        dicom_path = DICOM_ROOT / date / subseries
+        # Prefer the upscaled DICOM mirror (already on the mask grid); fall back
+        # to the originals, which the viewer Fourier-upscales on open.
+        dicom_path = UPSCALED_DICOM_ROOT / date / subseries
+        if not dicom_path.exists():
+            dicom_path = DICOM_ROOT / date / subseries
         if not dicom_path.exists():
             print(f"DICOM folder not found: {dicom_path}")
             sys.exit(1)
@@ -209,13 +234,19 @@ class OrthoMaskViewer(QtWidgets.QMainWindow):
         self.imgs = imgs
         self.xz_aspect = xz_aspect
 
-        self.upscale = max(1, int(upscale))
-        if self.upscale > 1:
-            print(f"Fourier-upscaling display images x{self.upscale} in-plane ...")
-            self.imgs = fourier_upscale(self.imgs, self.upscale)
-
         self.echo = 0
         self.n_echo, self.nZ, self.H, self.W = self.masks.shape
+
+        # The display images must sit on a whole multiple of the mask grid.
+        # Images loaded from the upscaled DICOM mirror already match the masks,
+        # so they are used as-is; only coarser originals are Fourier-upscaled
+        # (by `upscale`) to reach mask resolution. self.upscale is the resulting
+        # image-pixels-per-mask-pixel ratio that drives the panel geometry.
+        if self.imgs.shape[-1] < self.W:
+            factor = max(1, int(upscale))
+            print(f"Fourier-upscaling display images x{factor} in-plane to match masks ...")
+            self.imgs = fourier_upscale(self.imgs, factor)
+        self.upscale = max(1, self.imgs.shape[-1] // self.W)
 
         # Crosshair state
         self.z = 0  # XY slice (start at the first slice)
