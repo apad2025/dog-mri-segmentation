@@ -38,6 +38,10 @@ the masks, ensuring accuracy and correcting for SAM's mistakes. These masks are 
 Finally, these masks can be converted (and were in our project) to `.mat` files using `convert_to_mat.py` which writes
 to the `mat_out/` directory.
 
+For viewing in [ITK-SNAP](https://www.itksnap.org/), the `.mat` masks in `mat_out/` can be converted to DICOM
+segmentations with `mat_to_dcm.py`, which writes to the `converted_to_dcm/` directory. These can be loaded as a label
+overlay on top of the original upscaled series.
+
 ---
 
 ## Files
@@ -51,6 +55,7 @@ to the `mat_out/` directory.
 | `review_masks.py`                            | Read-only version of the editor. Same linked views and navigation, no painting/undo/save. Fourier-upscales display images on open to match the upscaled masks.                                                                                                                |
 | `fix_slice_reversal.py`                      | One-off repair for a specific mask, which the SAM2 notebook stored in reversed slice order. Reverses the slice axis; writes a `*.prereversal.npy` backup and is safe to re-run.                                                                                               |
 | `convert_to_mat.py`                          | Convert corrected `.npy` masks to MATLAB `.mat` files (drops a redundant echo dimension, was useful in our case but other projects may have varying echoes). Prompts for which series to convert (or `a` for all).                                                            |
+| `mat_to_dcm.py`                              | Convert `.mat` masks into single-echo DICOM segmentations for ITK-SNAP, matching the base series geometry so they overlay as a label. Prompts for the input `.mat` directory, the base DICOM root, and which mask to convert (or `a` for all); writes to `converted_to_dcm/`. |
 | `water_fat_separation/wfs_to_mask_editor.py` | Turn a CS-corrected water/fat-separation `.mat` into `..._WATER` / `..._FAT` DICOM series the editor can open, by cloning the source `0012` headers and replacing pixels. Prompts for which `.mat` in its directory to convert. May help with visibility during segmentation. |
 | `download_checkpoints.py`                    | Fetch the SAM2.1 Hiera-Large checkpoint into the project root.                                                                                                                                                                                                                |
 | `requirements.txt`                           | Python dependencies (install PyTorch separately).                                                                                                                                                                                                                             |
@@ -94,6 +99,7 @@ jupyter notebook sam2_segmentation.ipynb          # automatic segmentation (open
 python fourier_upscale.py                         # upscale images 2x (only run once)
 python mask_editor.py                             # use to refine auto-generated masks
 python convert_to_mat.py                          # optional to convert .npy masks to .mat
+python mat_to_dcm.py                              # optional to convert .mat masks to DICOM segmentations for ITK-SNAP
 python water_fat_separation/wfs_to_mask_editor.py # convert a .mat DICOM series that has been fat/water separated into DICOM images
 ```
 
